@@ -23,5 +23,5 @@ DeletePeer=удалять пир из пула, если он отключилс
 type IStreamStorage interface {
 	SavePeer(peer Peer) <-chan map[Peer]struct{}
 	DeletePeer(peer Peer) error
-	GetPeers(idCh IdChannel) map[Peer](chan map[Peer]struct{})
+	CloseChan(peer Peer)
 }

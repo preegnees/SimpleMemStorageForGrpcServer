@@ -42,7 +42,9 @@ func (s *storage) SavePeer(peer m.Peer) <-chan map[m.Peer]struct{} { // нужн
 	ch := make((chan map[m.Peer]struct{}))
 	peers[peer] = ch
 	s.streams[peer.IdChannel] = peers
-	
+
+	go s.SendPeers(peer.IdChannel)
+
 	return ch
 }
 
@@ -65,24 +67,20 @@ func (s *storage) DeletePeer(peer m.Peer) error {
 	delete(peers, peer)
 	close(ch)
 	s.streams[peer.IdChannel] = peers
+
+	go s.SendPeers(peer.IdChannel)
+
 	return nil
-}
-
-// Получение всех пиров
-func (s *storage) GetPeers(idCh m.IdChannel) map[m.Peer](chan map[m.Peer]struct{}) {
-
-	s.mx.Lock()
-	defer s.mx.Unlock()
-
-	peers, _ := s.streams[idCh]
-	return peers
 }
 
 // Для каждого idchannel будет создаваться свой канал, куда будет писать этот писарь
 // по идее у нас для каждого пира есть свой канала, через который он будет что то узнавать
 // эта функция должна вызываться каждый раз когда есть изменение в каком то id channel
-func (s *storage) SendPeers(idCh m.IdChannel) error {
-	peers := s.GetPeers(idCh)
+func (s *storage) SendPeers(idCh m.IdChannel) {
+	peers, ok := s.streams[idCh]
+	if !ok {
+		return
+	} 
 	ps := make(map[m.Peer]struct{}) // сохранение отдельно пиров
 	chs := make(map[chan map[m.Peer]struct{}]struct{}) // отдельно каналов
 	for k, v := range peers {
@@ -90,7 +88,16 @@ func (s *storage) SendPeers(idCh m.IdChannel) error {
 		chs[v] = struct{}{}
 	}
 	send(ps, chs)
-	return nil
+}
+
+func (s *storage) CloseChan(peer m.Peer) {
+	strm, ok := s.streams[peer.IdChannel]
+	if ok {
+		ch := strm[peer]
+		if ch != nil {
+			close(ch)
+		}
+	}
 }
 
 func send(ps map[m.Peer]struct{}, chs map[chan map[m.Peer]struct{}]struct{}) {

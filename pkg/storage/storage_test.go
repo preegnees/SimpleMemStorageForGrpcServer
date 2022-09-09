@@ -1,10 +1,10 @@
 package storage
 
 import (
-	"errors"
 	"fmt"
-	"math/rand"
 	"os"
+	"sync"
+	"time"
 
 	m "simpleMemStor/pkg/model"
 	"testing"
@@ -24,7 +24,7 @@ func TestMain(m *testing.M) {
 
 func TestSavePeersAndGetPeers(t *testing.T) {
 	var idCh1 m.IdChannel = "1"
-	var idCh2 m.IdChannel = "2"
+	// var idCh2 m.IdChannel = "2"
 
 	data := []struct {
 		Name string
@@ -33,77 +33,86 @@ func TestSavePeersAndGetPeers(t *testing.T) {
 		{"1", m.Peer{IdChannel: idCh1, Name: "N1", GrpcStream: "test1"}},
 		{"2", m.Peer{IdChannel: idCh1, Name: "N2", GrpcStream: "test2"}},
 		{"3", m.Peer{IdChannel: idCh1, Name: "N3", GrpcStream: "test3"}},
-		{"4", m.Peer{IdChannel: idCh2, Name: "N4", GrpcStream: "test4"}},
+		// {"4", m.Peer{IdChannel: idCh2, Name: "N4", GrpcStream: "test4"}},
 	}
+
+	chs := make([]<-chan map[m.Peer]struct{}, 0)
 
 	for _, d := range data {
-		stor.SavePeer(d.Peer)
+		chs = append(chs, stor.SavePeer(d.Peer))
+	}
+	
+
+	if len(chs) == 0 {
+		fmt.Println("Длинна массива chs = 0")
 	}
 
-	peers := stor.GetPeers(idCh1)
-
-	if len(peers) != 3 {
-		t.Error("Размер мапы не соответсвует значениб", len(peers))
-	}
-}
-
-func TestDeletePeerWithoutErr(t *testing.T) {
-	var idCh m.IdChannel = "1"
-
-	data := []struct {
-		Name string
-		Peer m.Peer
-	}{
-		{"1", m.Peer{IdChannel: idCh, Name: "N1", GrpcStream: "test1"}},
-		{"2", m.Peer{IdChannel: idCh, Name: "N2", GrpcStream: "test2"}},
-		{"3", m.Peer{IdChannel: idCh, Name: "N3", GrpcStream: "test3"}},
-		{"4", m.Peer{IdChannel: idCh, Name: "N4", GrpcStream: "test4"}},
+	count := 0
+	var mx sync.Mutex
+	incr := func () {
+		mx.Lock()
+		defer mx.Unlock()
+		count++
 	}
 
-	for _, d := range data {
-		stor.SavePeer(d.Peer)
+	var wg sync.WaitGroup
+	wg.Add(len(chs) + 1)
+
+	for i, ch := range chs {
+		go func (i int, ch <-chan map[m.Peer]struct{})  {
+			for {
+				select {
+				case val, ok := <-ch:
+					if ok {
+						incr()
+						fmt.Println("index=", i, ", val=", val)	
+						continue
+					}
+					wg.Done()
+					fmt.Println("index=", i, ", closed")
+					return
+				}
+			}
+		}(i, ch)
 	}
 
-	randPeerFromData := rand.Intn(len(data))
-
-	err := stor.DeletePeer(data[randPeerFromData].Peer)
+	time.Sleep(1 * time.Second)
+	err := stor.DeletePeer(m.Peer{IdChannel: idCh1, Name: "N1", GrpcStream: "test1"})
 	if err != nil {
-		t.Error("Ошибка должна равняться nil")
+		t.Error(err)
 	}
 
-	if len(stor.GetPeers(idCh)) != 3 {
-		t.Error("колличество элементов должно равняться трем")
-	}
-}
+	time.Sleep(1 * time.Second)
+	i := 5
+	myPeer := m.Peer{IdChannel: idCh1, Name: "N3000", GrpcStream: "test3000"}
+	ch := stor.SavePeer(myPeer)
 
-func TestDeletePeerWithErr(t *testing.T) {
-	var idCh m.IdChannel = "1"
+	go func (i int, ch <-chan map[m.Peer]struct{})  {
+		for {
+			select {
+			case val, ok := <-ch:
+				if ok {
+					incr()
+					fmt.Println("index=", i, ", val=", val)	
+					continue
+				}
+				wg.Done()
+				fmt.Println("index=", i, ", closed")
+				return
+			}
+		}
+	}(i, ch)
 
-	data := []struct {
-		Name string
-		Peer m.Peer
-	}{
-		{"1", m.Peer{IdChannel: idCh, Name: "N1", GrpcStream: "test1"}},
-		{"2", m.Peer{IdChannel: idCh, Name: "N2", GrpcStream: "test2"}},
-		{"3", m.Peer{IdChannel: idCh, Name: "N3", GrpcStream: "test3"}},
-		{"4", m.Peer{IdChannel: idCh, Name: "N4", GrpcStream: "test4"}},
-	}
-
+	time.Sleep(4 * time.Second)
 	for _, d := range data {
-		stor.SavePeer(d.Peer)
+		stor.CloseChan(d.Peer)
 	}
+	stor.CloseChan(myPeer)
+	wg.Wait()
 
-	err := stor.DeletePeer(m.Peer{IdChannel: "100", Name: "N1", GrpcStream: "test1"})
-	if !errors.Is(err, ErrInvalidIdChannelWhenRemove) {
-		t.Error("Ошибка не совпадает с ошибкой при невалидном канале", err)
-	}
+	fmt.Println(count)
 
-	err = stor.DeletePeer(m.Peer{IdChannel: idCh, Name: "N100", GrpcStream: "test100"})
-	if !errors.Is(err, ErrInvalidPeerWhenRemove) {
-		t.Error("Ошибка не совпадает с ошибкой при невалидном пире", err)
-	}
-
-	if len(stor.GetPeers(idCh)) != 4 {
-		t.Error("колличество элементов должно равняться четырем")
+	if count != len(chs) {
+		t.Error("не равно")
 	}
 }
