@@ -15,44 +15,35 @@ var _ m.IStreamStorage = (*storage)(nil)
 
 // Структура хранилища, состоит из мапы из айди канала и пиров этого канала
 type storage struct {
-	streams              map[m.IdChannel](map[m.Peer]struct{})
-	chs                  map[m.IdChannel](chan map[m.Peer]struct{})
-	NotifyOfNewConn      chan []m.Peer
-	CloseNotifyOfNewConn func()
-	mx                   sync.Mutex
+	streams map[m.IdChannel](map[m.Peer](chan map[m.Peer]struct{}))
+	mx      sync.Mutex
 }
 
 // Функция получения хранилища
 func NewStorage() m.IStreamStorage {
-	strg := make(map[m.IdChannel](map[m.Peer]struct{}))
-	cs := make(map[m.IdChannel](chan map[m.Peer]struct{}))
-	notify := make(chan []m.Peer)
-	funcCloseNotify := func() {
-		close(notify)
-	}
+	strg := make(map[m.IdChannel](map[m.Peer](chan map[m.Peer]struct{})))
 	return &storage{
-		streams:              strg,
-		chs:                  cs,
-		NotifyOfNewConn:      notify,
-		CloseNotifyOfNewConn: funcCloseNotify,
+		streams: strg,
 	}
 }
 
 // Сохранение пира при подключении
-func (s *storage) SavePeer(peer m.Peer) { // нужно возвращать канал, если его нет то создать
+func (s *storage) SavePeer(peer m.Peer) <-chan map[m.Peer]struct{} { // нужно возвращать канал, если его нет то создать
 
 	s.mx.Lock()
 	defer s.mx.Unlock()
 
-	peers, _ := s.streams[peer.IdChannel]
+	peers, ok := s.streams[peer.IdChannel]
 
-	if peers == nil {
-		peers = make(map[m.Peer]struct{})
+	if peers == nil || !ok {
+		peers = make(map[m.Peer](chan map[m.Peer]struct{}))
 	}
 
-	peers[peer] = struct{}{}
+	ch := make((chan map[m.Peer]struct{}))
+	peers[peer] = ch
 	s.streams[peer.IdChannel] = peers
-	return
+	
+	return ch
 }
 
 // Удаление пира при отключении
@@ -66,18 +57,19 @@ func (s *storage) DeletePeer(peer m.Peer) error {
 		return ErrInvalidIdChannelWhenRemove
 	}
 
-	_, ok = peers[peer]
+	ch, ok := peers[peer]
 	if !ok {
 		return ErrInvalidPeerWhenRemove
 	}
 
 	delete(peers, peer)
+	close(ch)
 	s.streams[peer.IdChannel] = peers
 	return nil
 }
 
 // Получение всех пиров
-func (s *storage) GetPeers(idCh m.IdChannel) map[m.Peer]struct{} {
+func (s *storage) GetPeers(idCh m.IdChannel) map[m.Peer](chan map[m.Peer]struct{}) {
 
 	s.mx.Lock()
 	defer s.mx.Unlock()
@@ -87,14 +79,26 @@ func (s *storage) GetPeers(idCh m.IdChannel) map[m.Peer]struct{} {
 }
 
 // Для каждого idchannel будет создаваться свой канал, куда будет писать этот писарь
-func (s *storage) sendPeers(idCh m.IdChannel) {
-	go func() {
-		ch, ok := s.chs[idCh]
-		if ok {
-			peers := s.GetPeers(idCh)
-			if len(peers) >= 2 {
-				ch <- peers
-			}
+// по идее у нас для каждого пира есть свой канала, через который он будет что то узнавать
+// эта функция должна вызываться каждый раз когда есть изменение в каком то id channel
+func (s *storage) SendPeers(idCh m.IdChannel) error {
+	peers := s.GetPeers(idCh)
+	ps := make(map[m.Peer]struct{}) // сохранение отдельно пиров
+	chs := make(map[chan map[m.Peer]struct{}]struct{}) // отдельно каналов
+	for k, v := range peers {
+		ps[k] = struct{}{}
+		chs[v] = struct{}{}
+	}
+	send(ps, chs)
+	return nil
+}
+
+func send(ps map[m.Peer]struct{}, chs map[chan map[m.Peer]struct{}]struct{}) {
+	go func ()  {
+		for	k := range chs {
+			go func(k chan map[m.Peer]struct{}) {
+				k <- ps
+			}(k)
 		}
 	}()
 }

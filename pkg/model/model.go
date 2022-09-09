@@ -21,7 +21,7 @@ SavePeer=сохранение пира в соответвии с его id ка
 DeletePeer=удалять пир из пула, если он отключился;
 */
 type IStreamStorage interface {
-	SavePeer(peer Peer)
+	SavePeer(peer Peer) <-chan map[Peer]struct{}
 	DeletePeer(peer Peer) error
-	GetPeers(idCh IdChannel) map[Peer]struct{}
+	GetPeers(idCh IdChannel) map[Peer](chan map[Peer]struct{})
 }
