@@ -1,27 +1,32 @@
 package model
 
-// IdChannel - айди канала, с которы свзяаны пиры
+// IdChannel - канала, который связывет пиры
 type IdChannel string
+
+// Name - имя клиента
+type Name string
+
+// Token - токен для связки в хранилище каналы и пиры
+type Token string
 
 /*
 Peer. Пир - это подключение, которое имеет:
-Name=Имя(клиента);
-Connected=статус подключения, если false, то стрим скорее всего nil;
+IdChannel: id канала, с которым он связан;
+Name: имя, которое имеет пир;
 GrpcStream=стрим gprc;
 */
 type Peer struct {
 	IdChannel  IdChannel
-	Name       string
+	Name       Name
 	GrpcStream interface{}
 }
 
 /*
 IMemStorage. Интерфейс для взаимодействия с базой данных.
-SavePeer=сохранение пира в соответвии с его id канала;
-DeletePeer=удалять пир из пула, если он отключился;
+SavePeer: сохранение пира;
+DeletePeer: удаление пира при отключении;
 */
 type IStreamStorage interface {
 	SavePeer(peer Peer) <-chan map[Peer]struct{}
 	DeletePeer(peer Peer) error
-	CloseChan(peer Peer)
 }
