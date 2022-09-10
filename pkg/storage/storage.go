@@ -3,6 +3,8 @@ package storage
 import (
 	"fmt"
 	"sync"
+	"math/rand"
+	"time"
 
 	m "simpleMemStor/pkg/model"
 )
@@ -13,146 +15,134 @@ var ErrInvalidPeerWhenRemove error = fmt.Errorf("Ошибка при удале�
 // Проверка на соответсвии интерфейсу
 var _ m.IStreamStorage = (*storage)(nil)
 
-// Структура хранилища, состоит из мапы из айди канала и пиров этого канала
+// storage. Структура хранилища
 type storage struct {
-	streams map[m.IdChannel](map[m.Peer](chan map[m.Peer]struct{}))
+	// Хранение Id каналов и их пиров, которые состоят их пиров и токенов
+	streams map[m.IdChannel](map[m.Peer]m.Token)
+	// Хранение токенов и каналов
+	chans   map[m.Token](chan map[m.Peer]struct{})
+	// Мьютекс для сохранения и удаления
 	mx      sync.Mutex
 }
 
-// Функция получения хранилища
+// NewStorage. Функция получения хранилища
 func NewStorage() m.IStreamStorage {
-	strg := make(map[m.IdChannel](map[m.Peer](chan map[m.Peer]struct{})))
+	
+	strg := make(map[m.IdChannel](map[m.Peer]m.Token))
+	chs := make(map[m.Token](chan map[m.Peer]struct{}))
 	return &storage{
 		streams: strg,
+		chans: chs,
 	}
 }
 
-// Сохранение пира при подключении
-func (s *storage) SavePeer(peer m.Peer) <-chan map[m.Peer]struct{} { // нужно возвращать канал, если его нет то создать
+// SavePeer. Сохранение пира при подключении
+func (s *storage) SavePeer(peer m.Peer) <-chan map[m.Peer]struct{} {
 
 	s.mx.Lock()
 	defer s.mx.Unlock()
 
+	// Получаем все пиры, связанные с каналом того пира, который хочет подключится. Если его нет, то создаем 
 	peers, ok := s.streams[peer.IdChannel]
-
-	if peers == nil || !ok {
-		peers = make(map[m.Peer](chan map[m.Peer]struct{}))
+	if !ok {
+		peers = make(map[m.Peer]m.Token)
 	}
 
+	// Проверяем на тот случай если в хранилище осталось предыдущее подключение, если оно есть, то удаляем
+	for p, t := range peers {
+		if p.Name == peer.Name {
+			delete(s.chans, t)
+			delete(peers, p)
+		}
+	}
+
+	// Создание канала
 	ch := make((chan map[m.Peer]struct{}))
-	peers[peer] = ch
+	
+	// Создаение токена, который будет связывать хранилище с клиентами и их каналами
+	token := m.Token(fmt.Sprintf("%d",rand.Int() + int(time.Now().UnixNano()) + rand.Int()))
+	// Сохранение токена и канала в хронилище каналов
+	s.chans[token] = ch
+	// Сохранение пира и токена
+	peers[peer] = token
+	// Сохранение обратно всего в общее хранилище
 	s.streams[peer.IdChannel] = peers
 
-	go s.SendPeers(peer.IdChannel)
+	// Рассылка всем, так как подключился новый клиент
+	go s.sendPeers(peer.IdChannel)
 
 	return ch
 }
 
-// Удаление пира при отключении
+// DeletePeer. Удаление пира при отключении
 func (s *storage) DeletePeer(peer m.Peer) error {
 
 	s.mx.Lock()
 	defer s.mx.Unlock()
 
+	// Получение пиров, который связаны с данном каналом
 	peers, ok := s.streams[peer.IdChannel]
 	if !ok {
 		return ErrInvalidIdChannelWhenRemove
 	}
 
-	ch, ok := peers[peer]
+	// Получение токена, который свзан с данным пиром
+	token, ok := peers[peer]
 	if !ok {
-		return ErrInvalidPeerWhenRemove
+		return ErrInvalidPeerWhenRemove // нужны ли тут вообще ошибки???
 	}
 
+	// Пытаемся достать канал, который связан с токеном, закрываем его и удаляем
+	ch, ok := s.chans[token]
+	if ok {
+		close(ch)
+		ch = nil
+		delete(s.chans, token)
+	}
+	
+	// Удаление пира
 	delete(peers, peer)
-	close(ch)
+
+	// Обратное сохранение пиров под idch
 	s.streams[peer.IdChannel] = peers
 
-	go s.SendPeers(peer.IdChannel)
+	// Рассылка всем об удалении
+	go s.sendPeers(peer.IdChannel)
 
 	return nil
 }
 
-// Для каждого idchannel будет создаваться свой канал, куда будет писать этот писарь
-// по идее у нас для каждого пира есть свой канала, через который он будет что то узнавать
-// эта функция должна вызываться каждый раз когда есть изменение в каком то id channel
-func (s *storage) SendPeers(idCh m.IdChannel) {
+// sendPeers. Вызывается каждый раз, когда происходят изменения в храненилищах
+func (s *storage) sendPeers(idCh m.IdChannel) {
+
+	// Пытаемся получить все пиры по idCh, если таких нет, то выходм (их может не быть???)
 	peers, ok := s.streams[idCh]
 	if !ok {
 		return
-	} 
-	ps := make(map[m.Peer]struct{}) // сохранение отдельно пиров
-	chs := make(map[chan map[m.Peer]struct{}]struct{}) // отдельно каналов
-	for k, v := range peers {
-		ps[k] = struct{}{}
-		chs[v] = struct{}{}
 	}
-	send(ps, chs)
-}
 
-func (s *storage) CloseChan(peer m.Peer) {
-	strm, ok := s.streams[peer.IdChannel]
-	if ok {
-		ch := strm[peer]
-		if ch != nil {
-			close(ch)
+	// Тут происходит создание двух мап, для хранения раздельно пиров и каналов этих пиров
+	ps := make(map[m.Peer]struct{})                    
+	chs := make(map[chan map[m.Peer]struct{}]struct{})
+	for p, t := range peers {
+		ps[p] = struct{}{}
+		ch, ok := s.chans[t]
+		if ok {
+			chs[ch] = struct{}{}
 		}
 	}
-}
 
-func send(ps map[m.Peer]struct{}, chs map[chan map[m.Peer]struct{}]struct{}) {
-	go func ()  {
-		for	k := range chs {
-			go func(k chan map[m.Peer]struct{}) {
-				k <- ps
-			}(k)
+	// Тут осуществляется рассылка всем клиентам об изменениях
+	go func() {
+		for ch := range chs {
+			go func(ch chan<- map[m.Peer]struct{}) {
+				defer func() {
+					if err := recover(); err != nil {
+						fmt.Println("канал почему то закрыт, err:=", err)
+					}
+				}()
+				ch <- ps
+			}(ch)
 		}
 	}()
 }
-
-// func (s *myStorage) SaveStream(streamNew m.Stream) (string, error) {
-// 	streamOld, ok := s.streams[streamNew.IdChannel]
-// 	if ok {
-// 		log.Println(streamNew)
-// 		log.Println(streamOld)
-// 		if len(streamNew.Peers) != len(streamOld.Peers) {
-// 			return "", fmt.Errorf("Одинаковый id канал, но разные значения, зачит вы где то ошиблись (разная длинна)")
-// 		}
-// 		count := 0
-// 		l := len(streamNew.Peers)
-// 		for _, pOld := range streamOld.Peers {
-// 			for _, pNew := range streamNew.Peers {
-// 				if pNew.Name == pOld.Name {
-// 					count++
-// 				}
-// 			}
-// 		}
-// 		if l == count {
-// 			return "Такой стрим уже есть", nil
-// 		}
-// 		return "", nil
-// 	} else {
-// 		s.streams[streamNew.IdChannel] = streamNew
-// 		log.Println("Было сохранено:", streamNew)
-// 		return "", nil
-// 	}
-// }
-
-// func (s *myStorage) SavePeer(idChannel string, peer m.Peer) error {
-// 	return nil
-// }
-
-// func (s *myStorage) SetFiledConnected(idChannel string, peer m.Peer, is bool) error {
-// 	return nil
-// }
-
-// func (s *myStorage) GetStreams() (strm chan<- m.Stream) {
-// 	return nil
-// }
-
-// func New() m.IStreamStorage {
-// 	return &myStorage{
-// 		streams: make(map[string]m.Stream, 0),
-// 		// peers:   make(map[m.Peer]struct{}, 0),
-// 	}
-// }
