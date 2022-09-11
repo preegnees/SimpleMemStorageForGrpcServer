@@ -2,15 +2,18 @@ package storage
 
 import (
 	"fmt"
-	"sync"
 	"math/rand"
+	"strings"
+	"sync"
 	"time"
+	"sort"
 
 	m "simpleMemStor/pkg/model"
 )
 
 var ErrInvalidIdChannelWhenRemove error = fmt.Errorf("Ошибка при удалении пира, такого канала не существует")
 var ErrInvalidPeerWhenRemove error = fmt.Errorf("Ошибка при удалении пира, такого пира не существует")
+var ErrInvalidAllowedNamesWhenSave error = fmt.Errorf("Ошибка при сохранении пира, allowedNames подключающегося клиентя не соответсвует allowedNames клиента в базе")
 
 // Проверка на соответсвии интерфейсу
 var _ m.IStreamStorage = (*storage)(nil)
@@ -37,7 +40,7 @@ func NewStorage() m.IStreamStorage {
 }
 
 // SavePeer. Сохранение пира при подключении
-func (s *storage) SavePeer(peer m.Peer) <-chan map[m.Peer]struct{} {
+func (s *storage) SavePeer(peer m.Peer) (<-chan map[m.Peer]struct{}, error) {
 
 	s.mx.Lock()
 	defer s.mx.Unlock()
@@ -56,6 +59,24 @@ func (s *storage) SavePeer(peer m.Peer) <-chan map[m.Peer]struct{} {
 		}
 	}
 
+	// Проверка на тот случай если, новый клиент будет иметь набор друзей, отличный от того, что есть уже в базе
+	if ok {
+		for p := range peers {
+			allowedPeersInDbSplited := strings.Split(p.AllowedNames,",")
+			sort.Strings(allowedPeersInDbSplited)
+			allowedPeersInDb := strings.Join(allowedPeersInDbSplited, "")
+
+			allowedPeersInThisSplited := strings.Split(peer.AllowedNames, ",")
+			sort.Strings(allowedPeersInThisSplited)
+			allowedPeersInThis := strings.Join(allowedPeersInThisSplited, "")
+			
+			if allowedPeersInDb != allowedPeersInThis {
+				return nil, ErrInvalidAllowedNamesWhenSave
+			}
+			break
+		}
+	}
+
 	// Создание канала
 	ch := make((chan map[m.Peer]struct{}))
 	
@@ -71,7 +92,7 @@ func (s *storage) SavePeer(peer m.Peer) <-chan map[m.Peer]struct{} {
 	// Рассылка всем, так как подключился новый клиент
 	go s.sendPeers(peer.IdChannel)
 
-	return ch
+	return ch, nil
 }
 
 // DeletePeer. Удаление пира при отключении
